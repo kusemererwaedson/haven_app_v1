@@ -15,6 +15,68 @@ import 'youtube_url.dart';
 import 'youtube_video_page.dart';
 
 const green = Color(0xff7eb441), navy = Color(0xff13223c);
+
+/// The counselling packages the ministry has published, in display order.
+/// Hidden packages never reach members, and a missing/blank price means
+/// "price on request" rather than free.
+List<Map<String, dynamic>> counsellingPackages(HavenStore store) {
+  final value = store.settings['counselling_packages'];
+  final list = value is List ? value : const [];
+  return list
+      .whereType<Map>()
+      .map((e) => Map<String, dynamic>.from(e))
+      .where(
+        (p) =>
+            (p['name'] ?? '').toString().isNotEmpty && p['active'] != false,
+      )
+      .toList();
+}
+
+int? packageAmount(Map<String, dynamic> item) {
+  final value = item['price_ugx'];
+  if (value == null || '$value'.isEmpty) return null;
+  return value is num ? value.toInt() : int.tryParse('$value');
+}
+
+bool packageNeedsPayment(Map<String, dynamic> item) =>
+    (packageAmount(item) ?? 0) > 0;
+
+double? moneyValue(dynamic value) =>
+    value == null || '$value'.isEmpty ? null : double.tryParse('$value');
+
+String ugx(num amount) {
+  final digits = amount.toInt().abs().toString();
+  final buffer = StringBuffer();
+  for (var i = 0; i < digits.length; i++) {
+    if (i > 0 && (digits.length - i) % 3 == 0) buffer.write(',');
+    buffer.write(digits[i]);
+  }
+  return 'UGX $buffer';
+}
+
+String packagePriceLabel(Map<String, dynamic> item) {
+  final amount = packageAmount(item);
+  if (amount == null) return 'Price on request';
+  return amount > 0 ? ugx(amount) : 'Free';
+}
+
+String packageMeta(Map<String, dynamic> item) {
+  final sessions = (item['sessions'] as num?)?.toInt() ?? 1;
+  final minutes = (item['minutes'] as num?)?.toInt() ?? 0;
+  final parts = [sessions == 1 ? '1 session' : '$sessions sessions'];
+  if (minutes > 0) parts.add('$minutes min');
+  return parts.join(' · ');
+}
+
+String paymentLabel(String? status) => switch (status) {
+  'not_required' => 'No payment needed',
+  'unpaid' => 'Awaiting payment',
+  'pending' => 'Payment pending',
+  'paid' => 'Paid',
+  'failed' => 'Payment failed',
+  _ => status ?? '',
+};
+
 Future<void> startHaven() async {
   WidgetsFlutterBinding.ensureInitialized();
   if (!kIsWeb) {
@@ -1203,6 +1265,19 @@ class _AccountPageState extends State<AccountPage> {
         }, register);
         name.text = widget.store.user?['name'] ?? '';
         password.clear();
+        if (!mounted) return;
+        final chosen = await showPackagesSheet(context, widget.store);
+        if (chosen != null && mounted) {
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => BookingPage(
+                store: widget.store,
+                initialPackage: chosen['name'] as String?,
+              ),
+            ),
+          );
+        }
       }
     } catch (e) {
       if (mounted) message(context, e);
@@ -1466,6 +1541,147 @@ class _GivingPageState extends State<GivingPage> with WidgetsBindingObserver {
   );
 }
 
+class PackageCard extends StatelessWidget {
+  const PackageCard({
+    super.key,
+    required this.item,
+    this.selected = false,
+    this.onSelect,
+    this.actionLabel,
+  });
+  final Map<String, dynamic> item;
+  final bool selected;
+  final VoidCallback? onSelect;
+  final String? actionLabel;
+  @override
+  Widget build(BuildContext context) {
+    final amount = packageAmount(item);
+    final compare = (item['compare_at_ugx'] as num?)?.toInt();
+    final description = (item['description'] ?? '').toString();
+    return Card(
+      margin: const EdgeInsets.only(bottom: 14),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(14),
+        side: BorderSide(
+          color: selected ? green : Theme.of(context).dividerColor,
+          width: selected ? 1.6 : 1,
+        ),
+      ),
+      child: InkWell(
+        onTap: onSelect,
+        borderRadius: BorderRadius.circular(14),
+        child: Padding(
+          padding: const EdgeInsets.all(18),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                packageMeta(item),
+                style: const TextStyle(fontSize: 11, letterSpacing: 0.7),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                '${item['name']}',
+                style: const TextStyle(
+                  fontSize: 17,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              if (description.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Text(description),
+              ],
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Text(
+                    packagePriceLabel(item),
+                    style: const TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                      color: green,
+                    ),
+                  ),
+                  if (amount != null &&
+                      compare != null &&
+                      compare > amount) ...[
+                    const SizedBox(width: 10),
+                    Text(
+                      ugx(compare),
+                      style: const TextStyle(
+                        decoration: TextDecoration.lineThrough,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+              if (actionLabel != null && onSelect != null) ...[
+                const SizedBox(height: 14),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton(
+                    onPressed: onSelect,
+                    child: Text(actionLabel!),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Shown straight after a member signs in or creates an account so they see
+/// what the counselling team offers before anything else.
+Future<Map<String, dynamic>?> showPackagesSheet(
+  BuildContext context,
+  HavenStore store,
+) {
+  final packages = counsellingPackages(store);
+  if (packages.isEmpty) return Future.value();
+  return showModalBottomSheet<Map<String, dynamic>>(
+    context: context,
+    isScrollControlled: true,
+    showDragHandle: true,
+    builder: (context) => DraggableScrollableSheet(
+      expand: false,
+      initialChildSize: 0.85,
+      maxChildSize: 0.95,
+      builder: (context, controller) => ListView(
+        controller: controller,
+        padding: const EdgeInsets.fromLTRB(22, 0, 22, 30),
+        children: [
+          const Text(
+            'Welcome home.',
+            style: TextStyle(fontSize: 26, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 6),
+          const Text('How can we walk with you?'),
+          const SizedBox(height: 12),
+          const Text(
+            'These are the counselling packages our team offers. Choose the one that fits your season — you can change it at any time.',
+            style: TextStyle(fontSize: 12),
+          ),
+          const SizedBox(height: 18),
+          ...packages.map(
+            (p) => PackageCard(
+              item: p,
+              actionLabel: 'Choose this package',
+              onSelect: () => Navigator.pop(context, p),
+            ),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('I’ll decide later'),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
 class LoginRequired extends StatelessWidget {
   const LoginRequired({super.key, required this.store, required this.onReturn});
   final HavenStore store;
@@ -1498,35 +1714,68 @@ class LoginRequired extends StatelessWidget {
 }
 
 class BookingPage extends StatefulWidget {
-  const BookingPage({super.key, required this.store});
+  const BookingPage({super.key, required this.store, this.initialPackage});
   final HavenStore store;
+  final String? initialPackage;
   @override
   State<BookingPage> createState() => _BookingPageState();
 }
 
-class _BookingPageState extends State<BookingPage> {
+class _BookingPageState extends State<BookingPage> with WidgetsBindingObserver {
   String topic = 'Faith and spiritual growth', mode = 'online';
+  String? selectedPackage;
   DateTime? date;
   final note = TextEditingController();
   bool busy = false;
+  int? paying;
   List<dynamic> bookings = [];
+  HavenStore get store => widget.store;
+
   @override
   void initState() {
     super.initState();
+    selectedPackage = widget.initialPackage;
+    WidgetsBinding.instance.addObserver(this);
     load();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     note.dispose();
     super.dispose();
   }
 
+  /// Coming back from the browser checkout proves nothing on its own, so any
+  /// payment still pending with the provider is re-checked through the API.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) load();
+  }
+
   Future<void> load() async {
-    if (widget.store.user == null) return;
+    if (store.user == null) return;
     try {
-      final result = await widget.store.api('/bookings');
-      if (mounted) setState(() => bookings = result);
+      var rows = List<dynamic>.from(await store.api('/bookings'));
+      final pending = rows
+          .where(
+            (r) =>
+                r['payment_status'] == 'pending' && r['tracking_id'] != null,
+          )
+          .toList();
+      if (pending.isNotEmpty) {
+        for (final row in pending) {
+          try {
+            await store.api(
+              '/bookings/payment/status/${row['tracking_id']}',
+            );
+          } catch (_) {
+            // A payment that cannot be confirmed stays pending.
+          }
+        }
+        rows = List<dynamic>.from(await store.api('/bookings'));
+      }
+      if (mounted) setState(() => bookings = rows);
     } catch (e) {
       if (mounted) message(context, e);
     }
@@ -1556,6 +1805,23 @@ class _BookingPageState extends State<BookingPage> {
     }
   }
 
+  Future<void> pay(int id) async {
+    setState(() => paying = id);
+    try {
+      final result = await store.api('/bookings/$id/pay', method: 'POST');
+      if (!await launchUrl(
+        Uri.parse('${result['redirect_url']}'),
+        mode: LaunchMode.externalApplication,
+      )) {
+        throw Exception('Unable to open checkout.');
+      }
+    } catch (e) {
+      if (mounted) message(context, e);
+    } finally {
+      if (mounted) setState(() => paying = null);
+    }
+  }
+
   Future<void> submit() async {
     if (date == null || date!.isBefore(DateTime.now())) {
       message(context, 'Choose a future date and time.');
@@ -1563,20 +1829,26 @@ class _BookingPageState extends State<BookingPage> {
     }
     setState(() => busy = true);
     try {
-      await widget.store.api(
+      final result = await store.api(
         '/bookings',
         method: 'POST',
         data: {
           'topic': topic,
           'mode': mode,
+          'package': selectedPackage,
           'requested_at': date!.toUtc().toIso8601String(),
           'message': note.text,
         },
       );
       note.clear();
       date = null;
+      final needsPayment = '${result['payment_status']}' == 'unpaid';
       await load();
-      if (mounted) {
+      if (!mounted) return;
+      if (needsPayment) {
+        await pay(result['id'] as int);
+      } else {
+        setState(() => selectedPackage = null);
         message(
           context,
           'Request received. Our team will contact you to confirm.',
@@ -1590,99 +1862,205 @@ class _BookingPageState extends State<BookingPage> {
   }
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('Counselling')),
-    body: widget.store.user == null
-        ? LoginRequired(
-            store: widget.store,
-            onReturn: () {
-              setState(() {});
-              load();
-            },
-          )
-        : ListView(
-            padding: const EdgeInsets.all(25),
-            children: [
-              const Text(
-                'You’re not alone.',
-                style: TextStyle(fontSize: 30, fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 10),
-              const Text('Request a conversation with someone who cares.'),
-              const SizedBox(height: 25),
-              DropdownButtonFormField<String>(
-                initialValue: topic,
-                isExpanded: true,
-                decoration: const InputDecoration(labelText: 'Topic'),
-                items:
-                    [
-                          'Faith and spiritual growth',
-                          'Relationships and family',
-                          'Grief and loss',
-                          'Personal wellbeing',
-                          'Something else',
-                        ]
+  Widget build(BuildContext context) {
+    final packages = counsellingPackages(store);
+    Map<String, dynamic>? chosen;
+    for (final p in packages) {
+      if (p['name'] == selectedPackage) chosen = p;
+    }
+    return Scaffold(
+      appBar: AppBar(title: const Text('Counselling')),
+      body: store.user == null
+          ? LoginRequired(
+              store: store,
+              onReturn: () {
+                setState(() {});
+                load();
+              },
+            )
+          : RefreshIndicator(
+              onRefresh: load,
+              child: ListView(
+                padding: const EdgeInsets.all(25),
+                children: [
+                  const Text(
+                    'You’re not alone.',
+                    style: TextStyle(fontSize: 30, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 10),
+                  const Text('Request a conversation with someone who cares.'),
+                  if (packages.isNotEmpty) ...[
+                    const SizedBox(height: 28),
+                    const Text(
+                      'Our counselling packages',
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    const Text(
+                      'Choose the level of support that fits your season. You can change it any time.',
+                      style: TextStyle(fontSize: 12),
+                    ),
+                    const SizedBox(height: 14),
+                    ...packages.map(
+                      (p) => PackageCard(
+                        item: p,
+                        selected: selectedPackage == p['name'],
+                        onSelect: () =>
+                            setState(() => selectedPackage = '${p['name']}'),
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 8),
+                  DropdownButtonFormField<String>(
+                    key: ValueKey('package-$selectedPackage'),
+                    initialValue: selectedPackage,
+                    isExpanded: true,
+                    decoration: const InputDecoration(
+                      labelText: 'Counselling package',
+                    ),
+                    hint: const Text('Not sure yet — help me choose'),
+                    items: packages
+                        .map(
+                          (p) => DropdownMenuItem(
+                            value: '${p['name']}',
+                            child: Text(
+                              '${p['name']} · ${packageMeta(p)} · ${packagePriceLabel(p)}',
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        )
+                        .toList(),
+                    onChanged: (v) => setState(() => selectedPackage = v),
+                  ),
+                  const SizedBox(height: 18),
+                  DropdownButtonFormField<String>(
+                    initialValue: topic,
+                    isExpanded: true,
+                    decoration: const InputDecoration(labelText: 'Topic'),
+                    items:
+                        [
+                              'Faith and spiritual growth',
+                              'Relationships and family',
+                              'Grief and loss',
+                              'Personal wellbeing',
+                              'Something else',
+                            ]
+                            .map(
+                              (v) => DropdownMenuItem(value: v, child: Text(v)),
+                            )
+                            .toList(),
+                    onChanged: (v) => topic = v!,
+                  ),
+                  const SizedBox(height: 18),
+                  DropdownButtonFormField<String>(
+                    initialValue: mode,
+                    decoration: const InputDecoration(labelText: 'Session format'),
+                    items: ['online', 'in-person', 'phone']
                         .map((v) => DropdownMenuItem(value: v, child: Text(v)))
                         .toList(),
-                onChanged: (v) => topic = v!,
-              ),
-              const SizedBox(height: 18),
-              DropdownButtonFormField<String>(
-                initialValue: mode,
-                decoration: const InputDecoration(labelText: 'Session format'),
-                items: ['online', 'in-person', 'phone']
-                    .map((v) => DropdownMenuItem(value: v, child: Text(v)))
-                    .toList(),
-                onChanged: (v) => mode = v!,
-              ),
-              const SizedBox(height: 18),
-              OutlinedButton.icon(
-                onPressed: pick,
-                icon: const Icon(Icons.calendar_month),
-                label: Text(
-                  date == null
-                      ? 'Choose date & time'
-                      : date.toString().substring(0, 16),
-                ),
-              ),
-              const SizedBox(height: 18),
-              TextField(
-                controller: note,
-                maxLines: 4,
-                maxLength: 3000,
-                decoration: const InputDecoration(
-                  labelText: 'Anything to share? (optional)',
-                ),
-              ),
-              const Text(
-                'Only authorized Caring Haven administrators can view your request. Your preferred time is subject to confirmation.',
-                style: TextStyle(fontSize: 11),
-              ),
-              const SizedBox(height: 22),
-              FilledButton(
-                onPressed: busy ? null : submit,
-                child: Text(busy ? 'Sending…' : 'Request a session'),
-              ),
-              const SizedBox(height: 30),
-              const Text(
-                'Your sessions',
-                style: TextStyle(fontSize: 21, fontWeight: FontWeight.bold),
-              ),
-              ...bookings.map(
-                (b) => ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: Text(b['topic']),
-                  subtitle: Text(
-                    DateTime.parse(
-                      '${b['requested_at']}Z',
-                    ).toLocal().toString().substring(0, 16),
+                    onChanged: (v) => mode = v!,
                   ),
-                  trailing: Text(b['status']),
-                ),
+                  const SizedBox(height: 18),
+                  OutlinedButton.icon(
+                    onPressed: pick,
+                    icon: const Icon(Icons.calendar_month),
+                    label: Text(
+                      date == null
+                          ? 'Choose date & time'
+                          : date.toString().substring(0, 16),
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  TextField(
+                    controller: note,
+                    maxLines: 4,
+                    maxLength: 3000,
+                    decoration: const InputDecoration(
+                      labelText: 'Anything to share? (optional)',
+                    ),
+                  ),
+                  Text(
+                    'Only authorized Caring Haven administrators can view your request. Your preferred time is subject to confirmation.'
+                    '${chosen != null && packageNeedsPayment(chosen) ? ' You will be taken to a secure checkout to pay for your package.' : ''}',
+                    style: const TextStyle(fontSize: 11),
+                  ),
+                  const SizedBox(height: 22),
+                  FilledButton(
+                    onPressed: busy ? null : submit,
+                    child: Text(busy ? 'Sending…' : 'Request a session'),
+                  ),
+                  const SizedBox(height: 30),
+                  Row(
+                    children: [
+                      const Expanded(
+                        child: Text(
+                          'Your sessions',
+                          style: TextStyle(
+                            fontSize: 21,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: 'Refresh sessions',
+                        onPressed: load,
+                        icon: const Icon(Icons.refresh),
+                      ),
+                    ],
+                  ),
+                  if (bookings.isEmpty) const Text('Your requests will appear here.'),
+                  ...bookings.map((b) {
+                    final amount = moneyValue(b['amount']);
+                    final unpaid = b['payment_status'] == 'unpaid' ||
+                        b['payment_status'] == 'failed';
+                    return ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      isThreeLine: amount != null && amount > 0,
+                      title: Text('${b['package'] ?? b['topic']}'),
+                      subtitle: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '${DateTime.parse('${b['requested_at']}Z').toLocal().toString().substring(0, 16)} · ${b['mode']}'
+                            '${b['package'] != null ? ' · ${b['topic']}' : ''}',
+                          ),
+                          if (amount != null && amount > 0)
+                            Text(
+                              '${ugx(amount)} · ${paymentLabel(b['payment_status'] as String?)}',
+                              style: const TextStyle(
+                                color: green,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                        ],
+                      ),
+                      trailing: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text('${b['status']}'),
+                          if (unpaid) ...[
+                            const SizedBox(width: 8),
+                            TextButton(
+                              onPressed: paying == b['id']
+                                  ? null
+                                  : () => pay(b['id'] as int),
+                              child: Text(
+                                paying == b['id'] ? 'Opening…' : 'Pay now',
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    );
+                  }),
+                ],
               ),
-            ],
-          ),
-  );
+            ),
+    );
+  }
 }
 
 class AboutPage extends StatelessWidget {
